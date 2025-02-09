@@ -182,7 +182,7 @@ def classify_outputs_folders(type):
     elif type == "Waifu":
         return ["waifu", "not_waifu"]
     elif type == "ChadPrefix score":
-        return ["Chad/Chad_Score_Number-filename.*"]
+        return ["Chad"]
     elif type == "ChadFolder":
         return ["Chad_Score_Number"]
 
@@ -230,11 +230,20 @@ def batch_classify(
     try:
         input_dir = Path(input_dir)
         output_dir = Path(output_dir)
+
+        # Validate input directory
+        if not input_dir.exists() or not input_dir.is_dir():
+            return f"Error: The input directory does not exist: {input_dir}"
+
+        # Find image paths
         image_paths = [
             p
             for p in input_dir.iterdir()
-            if (p.is_file and p.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp"])
+            if (p.is_file() and p.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp"])
         ]
+
+        if not image_paths:
+            raise ValueError("No image files found in the input directory.")
 
         print(f"Found {len(image_paths)} images")
 
@@ -248,8 +257,10 @@ def batch_classify(
         elif classify_type == "Chad":
             classifyer = judge_chad
 
-        folders = classify_outputs_folders(classify_type)
+        folder_type = f"{classify_type}{saving_style}" if classify_type == "Chad" else classify_type
+        folders = classify_outputs_folders(folder_type)
 
+        # Create output directories
         for f in folders:
             os.makedirs(output_dir / f, exist_ok=True)
 
@@ -260,6 +271,9 @@ def batch_classify(
             img = Image.open(f)
             f_name = f.stem
             result = classifyer(img)
+            if not result or not isinstance(result, dict):
+                print(f"Skipping {f} due to invalid classification result.")
+                continue
 
             max_score = 0
             max_label = None
@@ -277,11 +291,11 @@ def batch_classify(
             if max_label is None:
                 continue
             
-            #Chad has only a score
+            # Handle "Chad" as per its style
             if max_label == "Chad" and saving_style == "Folder":
-                max_label = repr(round(max_score*100)) 
+                max_label = str(round(max_score * 100)) 
             elif max_label == "Chad":
-                f_name = f"{repr(round(max_score*100))}-{f_name}"
+                f_name = f"{round(max_score*100)}-{f_name}"
 
             copy_or_move_files(
                 f, output_dir / max_label, output_style == "Copy", together, f_name
