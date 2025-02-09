@@ -86,17 +86,18 @@ def get_score(image):
     score = predictor(torch.from_numpy(image_features).to(device).float())
     return (score.item() / 10) # make it match the other percentile scores
 
-def library_check():
+def library_check(name):
     if not launch.is_installed("transformers"):
         launch.run_pip("install transformers", "requirements for Cafe Aesthetic")
 
     elif name == "chad":
-        aesthetics["chad"] = get_score
+        if "chad" not in aesthetics:
+            aesthetics["chad"] = get_score
 
 
 def model_check(name):
     if name not in aesthetics:
-        library_check()
+        library_check(name)
         from transformers import pipeline
         import torch
         if not torch.cuda.is_available():
@@ -157,18 +158,20 @@ def judge_waifu(image):
 def judge_chad(image):
     model_check("chad")
     result = {}
+    if "chad" not in aesthetics:
+        raise RuntimeError("Chad model failed to initialize")
     score = aesthetics["chad"](image)
     result["Chad"] = score 
     return result
 
 def judge(image):
     if image is None:
-        return None, None, None
+        return None, None, None, None
     aesthetic = judge_aesthetic(image)
     style = judge_style(image)
     waifu = judge_waifu(image)
     chad = judge_chad(image)
-    return aesthetic, style, waifu
+    return aesthetic, style, waifu, chad
 
 
 def classify_outputs_folders(type):
