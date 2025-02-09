@@ -1,9 +1,16 @@
 import os
 from pathlib import Path
-from glob import glob
+from glob import escape
 import shutil
 
+from modules import scripts, script_callbacks
+from modules.shared import opts
+
 import gradio as gr
+import torch
+import torch.nn as nn
+import clip
+
 from PIL import Image, ImageFile
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -16,10 +23,75 @@ import launch
 script_dir = Path(scripts.basedir())
 aesthetics = {}  # name: pipeline
 
+state_name = "sac+logos+ava1-l14-linearMSE.pth"
+if not Path(state_name).exists():
+    url = f"https://github.com/christophschuhmann/improved-aesthetic-predictor/blob/main/{state_name}?raw=true"
+    import requests
+    r = requests.get(url)
+    with open(state_name, "wb") as f:
+        f.write(r.content)
+
+
+class AestheticPredictor(nn.Module):
+    def __init__(self, input_size):
+        super().__init__()
+        self.input_size = input_size
+        self.layers = nn.Sequential(
+            nn.Linear(self.input_size, 1024),
+            nn.Dropout(0.2),
+            nn.Linear(1024, 128),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.Dropout(0.1),
+            nn.Linear(64, 16),
+            nn.Linear(16, 1)
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+
+
+try:
+    force_cpu = opts.ais_force_cpu
+except:
+    force_cpu = False
+
+if force_cpu:
+    print(f"{extension_name}: Forcing prediction model to run on CPU")
+device = "cuda" if not force_cpu and torch.cuda.is_available() else "cpu"
+# load the model you trained previously or the model available in this repo
+pt_state = torch.load(state_name, map_location=torch.device(device=device))
+
+# CLIP embedding dim is 768 for CLIP ViT L 14
+predictor = AestheticPredictor(768)
+predictor.load_state_dict(pt_state)
+predictor.to(device)
+predictor.eval()
+
+clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
+
+
+def get_image_features(image, device=device, model=clip_model, preprocess=clip_preprocess):
+    image = preprocess(image).unsqueeze(0).to(device)
+    with torch.no_grad():
+        image_features = model.encode_image(image)
+        # l2 normalize
+        image_features /= image_features.norm(dim=-1, keepdim=True)
+    image_features = image_features.cpu().detach().numpy()
+    return image_features
+
+
+def get_score(image):
+    image_features = get_image_features(image)
+    score = predictor(torch.from_numpy(image_features).to(device).float())
+    return (score.item() / 10) # make it match the other percentile scores
 
 def library_check():
     if not launch.is_installed("transformers"):
         launch.run_pip("install transformers", "requirements for Cafe Aesthetic")
+
+    elif name == "chad":
+        aesthetics["chad"] = get_score
 
 
 def model_check(name):
@@ -82,6 +154,12 @@ def judge_waifu(image):
         result[d["label"]] = d["score"]
     return result
 
+def judge_chad(image):
+    model_check("chad")
+    result = {}
+    score = aesthetics["chad"](image)
+    result["Chad"] = score 
+    return result
 
 def judge(image):
     if image is None:
@@ -89,6 +167,7 @@ def judge(image):
     aesthetic = judge_aesthetic(image)
     style = judge_style(image)
     waifu = judge_waifu(image)
+    chad = judge_chad(image)
     return aesthetic, style, waifu
 
 
@@ -99,41 +178,50 @@ def classify_outputs_folders(type):
         return ["anime", "other", "real_life", "3d", "manga_like"]
     elif type == "Waifu":
         return ["waifu", "not_waifu"]
+    elif type == "ChadPrefix score":
+        return ["Chad/Chad_Score_Number-filename.*"]
+    elif type == "ChadFolder":
+        return ["Chad_Score_Number"]
 
 
-def output_dir_previews_update(value, classify_type):
+def output_dir_previews_update(value, classify_type, save_type):
     if value == "":
         return
-    folders = classify_outputs_folders(classify_type)
+    if not classify_type == "Chad":
+        save_type=""
+    folders = classify_outputs_folders(f"{classify_type}{save_type}")
     output_dir_previews = "\n".join([f"- {Path(value)/f}" for f in folders])
 
-    return f"Output dirs will be created like: \n{output_dir_previews}"
+    return [f"Output dirs will be created like: \n{output_dir_previews}", gr.update(visible = classify_type == "Chad")]
 
 
 def progress_str(progress):
     return int(progress * 1000) / 10
 
 
-def copy_or_move_files(img_path: Path, to: Path, copy, together):
-    img_name = img_path.stem  # hoge.jpg
+def copy_or_move_files(img_path: Path, to: Path, copy, together, img_name = None):
+    if img_name == None:
+        img_name = img_path.stem  # hoge.jpg
+
+    os.makedirs(to, exist_ok=True) # only make dirs when neccessary
     if together:
-        for p in img_path.parent.glob(f"{img_name}.*"):
+        for p in img_path.parent.glob(f"{escape(img_path.stem)}.*"):
             if copy:
-                shutil.copy2(p, to / p.name)
+                shutil.copy2(p, to / f"{img_name}{p.suffix}")
             else:
                 if os.path.exists(p):
-                    p.rename(to / p.name)
+                    p.rename(to / f"{img_name}{p.suffix}")
                 else:
                     print(f"Not found: {p}".encode("utf-8"))
     else:
         if copy:
-            shutil.copy2(img_path, to / img_path.name)
+            shutil.copy2(img_path, to / f"{img_name}{img_path.suffix}")
         else:
-            img_path.rename(to / img_path.name)
+            img_path.rename(to / f"{img_name}{img_path.suffix}")
 
 
 def batch_classify(
-    input_dir, output_dir, classify_type, output_style, together, basis, threshold
+    input_dir, output_dir, classify_type, output_style, saving_style, together, basis, threshold
 ):
     print("Batch classifying started")
     try:
@@ -154,6 +242,8 @@ def batch_classify(
             classifyer = judge_style
         elif classify_type == "Waifu":
             classifyer = judge_waifu
+        elif classify_type == "Chad":
+            classifyer = judge_chad
 
         folders = classify_outputs_folders(classify_type)
 
@@ -165,6 +255,7 @@ def batch_classify(
                 continue
 
             img = Image.open(f)
+            f_name = f.stem
             result = classifyer(img)
 
             max_score = 0
@@ -182,9 +273,15 @@ def batch_classify(
 
             if max_label is None:
                 continue
+            
+            #Chad has only a score
+            if max_label == "Chad" and saving_style == "Folder":
+                max_label = repr(round(max_score*100)) 
+            elif max_label == "Chad":
+                f_name = f"{repr(round(max_score*100))}-{f_name}"
 
             copy_or_move_files(
-                f, output_dir / max_label, output_style == "Copy", together
+                f, output_dir / max_label, output_style == "Copy", together, f_name
             )
 
             print(
@@ -218,6 +315,7 @@ def on_ui_tabs():
 
                         with gr.Column():
                             single_aesthetic_result = gr.Label(label="Aesthetic")
+                            single_chad_result = gr.Label(label="Chad")
                             single_style_result = gr.Label(label="Style")
                             single_waifu_result = gr.Label(label="Waifu")
 
@@ -240,9 +338,17 @@ def on_ui_tabs():
 
                             classify_type_radio = gr.Radio(
                                 label="Classify type",
-                                choices=["Aesthetic", "Style", "Waifu"],
+                                choices=["Aesthetic", "Style", "Waifu", "Chad"],
                                 value="Aesthetic",
                                 interactive=True,
+                            )
+
+                            save_style_radio = gr.Radio(
+                                label="Chad save style",
+                                choices=["Prefix score", "Folder"],
+                                value="Prefix score",
+                                interactive=True,
+                                visible = classify_type_radio.value == "Chad"
                             )
 
                             output_style_radio = gr.Radio(
@@ -298,23 +404,28 @@ def on_ui_tabs():
         image.change(
             fn=judge,
             inputs=image,
-            outputs=[single_aesthetic_result, single_style_result, single_waifu_result],
+            outputs=[single_aesthetic_result, single_style_result, single_waifu_result, single_chad_result],
         )
         single_start_btn.click(
             fn=judge,
             inputs=image,
-            outputs=[single_aesthetic_result, single_style_result, single_waifu_result],
+            outputs=[single_aesthetic_result, single_style_result, single_waifu_result, single_chad_result],
         )
 
         output_dir_input.change(
             fn=output_dir_previews_update,
-            inputs=[output_dir_input, classify_type_radio],
-            outputs=[output_dir_previews_md],
+            inputs=[output_dir_input, classify_type_radio, save_style_radio],
+            outputs=[output_dir_previews_md, save_style_radio],
         )
         classify_type_radio.change(
             fn=output_dir_previews_update,
-            inputs=[output_dir_input, classify_type_radio],
-            outputs=[output_dir_previews_md],
+            inputs=[output_dir_input, classify_type_radio, save_style_radio],
+            outputs=[output_dir_previews_md, save_style_radio],
+        )
+        save_style_radio.change(
+            fn=output_dir_previews_update,
+            inputs=[output_dir_input, classify_type_radio, save_style_radio],
+            outputs=[output_dir_previews_md, save_style_radio],
         )
 
         batch_start_btn.click(
@@ -324,6 +435,7 @@ def on_ui_tabs():
                 output_dir_input,
                 classify_type_radio,
                 output_style_radio,
+                save_style_radio,
                 copy_or_move_captions_together,
                 basis_radio,
                 absolute_slider,
