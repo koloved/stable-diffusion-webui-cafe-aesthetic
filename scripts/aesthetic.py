@@ -8,7 +8,7 @@ from PIL import Image, ImageFile
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-from webui import wrap_gradio_gpu_call
+from modules.call_queue import wrap_gradio_gpu_call
 from modules import shared, scripts, script_callbacks, ui
 from modules import generation_parameters_copypaste as parameters_copypaste
 import launch
@@ -27,20 +27,33 @@ def model_check(name):
         library_check()
         from transformers import pipeline
         import torch
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA not available but required for this implementation")
 
+        # Create pipeline and force model to GPU
         if name == "aesthetic":
             aesthetics["aesthetic"] = pipeline(
-                "image-classification", model="cafeai/cafe_aesthetic", device=device
+                "image-classification", 
+                model="cafeai/cafe_aesthetic",
+                device=0  # Force to first GPU
             )
+            aesthetics["aesthetic"].model.to(torch.device('cuda'))  # Extra safety
+            
         elif name == "style":
             aesthetics["style"] = pipeline(
-                "image-classification", model="cafeai/cafe_style", device=device
+                "image-classification",
+                model="cafeai/cafe_style",
+                device=0
             )
+            aesthetics["style"].model.to(torch.device('cuda'))
+            
         elif name == "waifu":
             aesthetics["waifu"] = pipeline(
-                "image-classification", model="cafeai/cafe_waifu", device=device
+                "image-classification",
+                model="cafeai/cafe_waifu",
+                device=0
             )
+            aesthetics["waifu"].model.to(torch.device('cuda'))
 
 
 def judge_aesthetic(image):
@@ -189,7 +202,7 @@ def on_ui_tabs():
         with gr.Column():
             with gr.Tabs():
                 with gr.TabItem(label="Single"):
-                    with gr.Row().style(equal_height=False):
+                    with gr.Row(equal_height=False):
                         with gr.Column():
                             # with gr.Tabs():
                             image = gr.Image(
@@ -210,7 +223,7 @@ def on_ui_tabs():
 
                 with gr.TabItem(label="Batch"):
 
-                    with gr.Row().style(equal_height=False):
+                    with gr.Row(equal_height=False):
                         with gr.Column():
                             input_dir_input = gr.Textbox(
                                 label="Image Directory",
